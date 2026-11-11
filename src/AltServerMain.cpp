@@ -86,7 +86,7 @@ void print_help() {
 			"\n"
 			"The following environment var can be set for some special situation:\n"
 			"  - ALTSERVER_ANISETTE_SERVER: Set to custom anisette server URL\n"
-			"          if not set, the default one: https://armconverter.com/anisette/irGb3Quww8zrhgqnzmrx, is used\n"
+			"          if not set, the default one: https://new.ani.sidestore.io, is used\n"
 			"  - ALTSERVER_NO_SUBSCRIBE: (*unused*) Please enable this for usbmuxd server that do not correctly usbmuxd_listen interfaces\n"
 			);
 }
