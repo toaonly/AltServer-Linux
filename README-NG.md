@@ -1,20 +1,26 @@
 # AltServer-Linux-NG
 
-A fork of [NyaMisty/AltServer-Linux](https://github.com/NyaMisty/AltServer-Linux) that installs and
-signs apps for **iOS 26.4 / 27** devices over Wi-Fi. Upstream has been unmaintained since 2023
+This is [toaonly/AltServer-Linux](https://github.com/toaonly/AltServer-Linux), based on the `ng` branch of
+[jaakkopalvaila/AltServer-Linux](https://github.com/jaakkopalvaila/AltServer-Linux) (all credit for the
+fixes below goes to them), which is itself a fork of
+[NyaMisty/AltServer-Linux](https://github.com/NyaMisty/AltServer-Linux). It installs and signs apps
+for **iOS 26.4 / 27** devices over Wi-Fi. Upstream has been unmaintained since 2023
 (only automated keepalive commits) and its v0.0.5 binary fails on modern iOS for two independent
 reasons, both fixed here.
 
 Layout:
 
-- This repository, branch `ng`: the AltServer-Linux tree.
-- Submodule `upstream_repo` = [jaakkopalvaila/AltServer-Windows](https://github.com/jaakkopalvaila/AltServer-Windows),
-  branch `ng-fixes`: vendored AltSign + ldid with the signing and sign-in fixes.
-- Submodule `libraries/libimobiledevice` = [jaakkopalvaila/libimobiledevice](https://github.com/jaakkopalvaila/libimobiledevice),
-  branch `ng-fixes`: netmuxd address-format fix.
+- This repository, branch `new` (the default branch): the AltServer-Linux tree. It merged the `ng` branch
+  (release ng-2026-11-05) in PR #1, plus a `--help` fix; PR #2 repointed the submodules.
+- Submodule `upstream_repo` = [toaonly/AltServer-Windows](https://github.com/toaonly/AltServer-Windows),
+  branch `ng-fixes`: vendored AltSign + ldid with the signing and sign-in fixes (forked from
+  jaakkopalvaila/AltServer-Windows at the same commit).
+- Submodule `libraries/libimobiledevice` = [toaonly/libimobiledevice](https://github.com/toaonly/libimobiledevice),
+  branch `ng-fixes`: netmuxd address-format fix (forked from jaakkopalvaila/libimobiledevice at the
+  same commit).
 - All other submodules track their upstream repositories unchanged.
 
-Clone with `git clone --recursive -b ng https://github.com/jaakkopalvaila/AltServer-Linux`.
+Clone with `git clone --recursive https://github.com/toaonly/AltServer-Linux`.
 
 ## Fix 1 — code signature rejected by iOS 26.4+
 
@@ -245,9 +251,11 @@ also turns on libimobiledevice's own debug output for the device connection.
 
 ## Prebuilt binaries
 
-Static binaries for x86_64, aarch64, armv7 and i586 are attached to the
-[Releases](https://github.com/jaakkopalvaila/AltServer-Linux/releases) page. Every push to `ng` also
-produces them as GitHub Actions artifacts, which expire after 90 days.
+This fork has no Releases yet. The "Build AltServer" GitHub Actions workflow runs on every push and
+uploads AltServer-{x86_64,aarch64,armv7,i586} artifacts, which expire after 90 days:
+[Actions](https://github.com/toaonly/AltServer-Linux/actions). Prebuilt static binaries of the same
+code are on the [jaakkopalvaila/AltServer-Linux Releases](https://github.com/jaakkopalvaila/AltServer-Linux/releases)
+page (ng-2026-11-05).
 
 ## Building
 
@@ -255,7 +263,7 @@ Builds run in the prebuilt upstream Alpine image. On an Apple Silicon Mac, Roset
 container at native speed and a clean build takes about 30 seconds.
 
 ```bash
-git clone --recursive -b ng https://github.com/jaakkopalvaila/AltServer-Linux
+git clone --recursive https://github.com/toaonly/AltServer-Linux
 cd AltServer-Linux
 mkdir -p build
 docker run --rm --platform linux/amd64 -v "$PWD:/workdir" -w /workdir \
@@ -292,3 +300,47 @@ edge is blocking, `-80045` means the client info does not match the anisette pro
 and an account error such as `-20970` "account information entered incorrectly" means the request
 passed every check up to the password. A made-up account cannot reach the step where `-80046`
 occurs, so this test cannot prove that a setup is free of it.
+
+## AltStore in-app sign-in (HTTP 503)
+
+After AltStore Classic is installed, AltStore > Settings > Sign in with Apple ID needs AltServer
+running in server mode (`./AltServer-x86_64` with no arguments). AltStore reaches it over USB (wired
+connection; AltServer answers with anisette data) or over Wi-Fi via Bonjour `_altserver._tcp` on the
+same network. If no server runs, AltStore reports that it cannot find AltServer.
+
+AltStore then signs in to gsa.apple.com itself with that anisette data, but AltStore Classic 2.3.x
+(checked: 2.3.3) hardcodes the GrandSlam User-Agent `akd/1.0 CFNetwork/808.1.4` in
+`Payload/AltStore.app/Frameworks/AltStoreCore.framework/AltStoreCore`. Apple's edge answers HTTP 503. See
+[altstoreio/AltStore#1842](https://github.com/altstoreio/AltStore/issues/1842) (analysis) and
+[#1871](https://github.com/altstoreio/AltStore/issues/1871) (2.3.3, open). AltServer's own sign-in is
+not affected (its AltSign sends a current User-Agent, Fix 2).
+
+Workaround: replace that string once with the same-length `akd/1.0 CFNetwork/1568.10` (a value
+reported in #1842 to pass the edge) in a copy of the IPA, then install the copy with AltServer.
+AltServer re-signs the whole bundle, so the edit does not break the signature.
+
+```python
+import zipfile
+src, dst = 'AltStore.ipa', 'AltStore-ua-patched.ipa'
+target = 'Payload/AltStore.app/Frameworks/AltStoreCore.framework/AltStoreCore'
+old, new = b'akd/1.0 CFNetwork/808.1.4', b'akd/1.0 CFNetwork/1568.10'
+assert len(old) == len(new)
+with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, 'w') as zout:
+    for info in zin.infolist():
+        data = zin.read(info.filename)
+        if info.filename == target:
+            assert data.count(old) == 1
+            data = data.replace(old, new)
+        zout.writestr(info, data, compress_type=info.compress_type)
+```
+
+Then stop any server-mode instance, install the patched IPA
+(`./AltServer-x86_64 -u <UDID> -a <apple-id> -p <password> AltStore-ua-patched.ipa`), start server mode
+again, and sign in from AltStore with the device connected.
+
+Verified on 2026-11-11: x86_64 Ubuntu 26.04, iPhone 15 Pro (iPhone16,1) on iOS 27.2, over USB,
+AltStore Classic 2.3.3. The unpatched IPA gave HTTP 503 at sign-in; the patched IPA signed in.
+
+Caveat: the replacement value comes from third-party tests in #1842 and may stop working. Stop after
+one or two failed sign-ins (account lock risk, see "Protect your Apple account" in Fix 5). Re-apply
+the patch for each new AltStore IPA until AltStore ships a fix.
