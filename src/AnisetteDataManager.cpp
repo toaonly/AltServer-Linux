@@ -4,12 +4,17 @@
 #include "Error.hpp"
 #include "ServerError.hpp"
 
+#include <map>
+#include <mutex>
 #include <set>
 #include <ctime>
 #include <cstdlib>
+#include <cstring>
+#include <cctype>
 
 #include "AnisetteData.h"
 #include "AltServerApp.h"
+#include "AnisetteV3.h"
 
 #define odslog(msg) { std::stringstream ss; ss << msg << std::endl; OutputDebugStringA(ss.str().c_str()); }
 
@@ -51,24 +56,104 @@ using namespace web::http::client;          // HTTP client features
 
 std::string GetAnisetteURL() {
 	const char *server = getenv("ALTSERVER_ANISETTE_SERVER");
-	if (server) {
+	if (server && strlen(server) > 0) {
 		return server;
 	}
-	return U("https://armconverter.com/anisette/irGb3Quww8zrhgqnzmrx");
+	// Provides Mac anisette (README-NG, Fix 5) and speaks anisette v3 (Fix 8).
+	return U("https://new.ani.sidestore.io");
+}
+
+// Apple rejects any gsa.apple.com request whose X-Mme-Client-Info (aka
+// "client info" / device description) header contains the substring
+// "com.apple.dt.Xcode" with a 503. Replace every occurrence with
+// "com.apple.akd" so no AnisetteData built from this manager ever leaks
+// that string to Apple, regardless of what the anisette server returns.
+std::string SanitizeClientInfo(const std::string& clientInfo)
+{
+	static const std::string needle = "com.apple.dt.Xcode";
+	static const std::string replacement = "com.apple.akd";
+
+	std::string result = clientInfo;
+	size_t pos = 0;
+	while ((pos = result.find(needle, pos)) != std::string::npos)
+	{
+		result.replace(pos, needle.length(), replacement);
+		pos += replacement.length();
+	}
+
+	return result;
+}
+
+// Client info sent to Apple as X-Mme-Client-Info (and handed to AltStore with the anisette data).
+// Default: the anisette server's own value. Since 2026-10-21 Apple accepts only a client info that
+// matches the platform the anisette data was provisioned as, and only Mac anisette at the 2FA/apptokens
+// steps (README-NG, Fix 5). ALTSERVER_CLIENT_INFO overrides it: "windows" selects the Windows AuthKit
+// identity AltServer for Windows uses, any other non-empty value is sent as is. Any value still goes
+// through SanitizeClientInfo, because gsa.apple.com rejects every client info containing com.apple.dt.Xcode.
+std::string FilterClientInfo(const std::string& serverClientInfo)
+{
+	std::string clientInfo = serverClientInfo;
+	const char* envClientInfo = getenv("ALTSERVER_CLIENT_INFO");
+	if (envClientInfo && strlen(envClientInfo) > 0)
+	{
+		std::string value(envClientInfo);
+		if (value == "windows")
+		{
+			clientInfo = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>";
+		}
+		else if (value != "anisette" && value != "original")
+		{
+			clientInfo = value;
+		}
+	}
+
+	std::string sanitizedClientInfo = SanitizeClientInfo(clientInfo);
+	odslog("Sanitized client info: " << sanitizedClientInfo);
+	return sanitizedClientInfo;
+}
+
+// ALTSERVER_ANISETTE_PROTOCOL: "v3", "v1", or "auto" (the default), which uses v3 when the server answers
+// /v3/client_info. v3 keeps one provisioned identity on this computer; v1 takes whatever identity the
+// server hands out, which for some servers (new.ani.sidestore.io) is a new one on every request.
+bool UsesAnisetteV3(const std::string& serverURL)
+{
+	const char* value = getenv("ALTSERVER_ANISETTE_PROTOCOL");
+	std::string protocol = (value != nullptr && strlen(value) > 0) ? value : "auto";
+
+	if (protocol == "v3" || protocol == "v1")
+	{
+		return protocol == "v3";
+	}
+
+	if (protocol != "auto")
+	{
+		odslog("Unknown ALTSERVER_ANISETTE_PROTOCOL value " << protocol << ", using auto.");
+	}
+
+	static std::mutex mutex;
+	static std::map<std::string, bool> supportsV3;
+
+	std::lock_guard<std::mutex> lock(mutex);
+	if (supportsV3.count(serverURL) == 0)
+	{
+		supportsV3[serverURL] = AnisetteV3::IsSupported(serverURL);
+		odslog("Anisette server " << serverURL << ": using " << (supportsV3[serverURL] ? "v3" : "v1") << " (auto).");
+	}
+
+	return supportsV3[serverURL];
 }
 
 std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 {
-	// auto client = web::http::client::http_client(U("https://armconverter.com"));
-	// std::string wideURI = ("/anisette/irGb3Quww8zrhgqnzmrx");
-	
-	// auto encodedURI = web::uri::encode_uri(wideURI);
-	// uri_builder builder(encodedURI);
+	std::string serverURL = GetAnisetteURL();
+	if (UsesAnisetteV3(serverURL))
+	{
+		auto anisetteData = AnisetteV3::FetchAnisetteData(serverURL, FilterClientInfo);
+		odslog(*anisetteData);
+		return anisetteData;
+	}
 
-	// http_request request(methods::GET);
-	// request.set_request_uri(builder.to_string());
-
-	auto client = web::http::client::http_client(GetAnisetteURL());
+	auto client = web::http::client::http_client(serverURL);
 	http_request request(methods::GET);
 	
 	std::map<utility::string_t, utility::string_t> headers = {
@@ -99,33 +184,39 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 			})
 		.then([&anisetteData](pplx::task<json::value> previousTask)
 			{
-				odslog("parse anisette data ret");
+				// The values are anisette secrets (machine ID, one-time password), so they stay out of the log.
 				json::value jsonVal = previousTask.get();
-				odslog("Got anisetteData json: " << jsonVal);
-				std::vector<std::string> keys = {
-					"X-Apple-I-MD-M",
-					"X-Apple-I-MD",
-					"X-Apple-I-MD-LU",
-					"X-Apple-I-MD-RINFO",
-					"X-Mme-Device-Id",
-					"X-Apple-I-SRL-NO",
-					"X-MMe-Client-Info",
-					"X-Apple-I-Client-Time",
-					"X-Apple-Locale",
-					"X-Apple-I-TimeZone"
-				};
-				for (auto &key : keys) {
-					odslog(key << ": " << jsonVal.at(key).as_string().c_str());
+
+				// X-Apple-I-Client-Time is UTC, for example 2026-09-26T12:34:56Z. Some anisette servers add
+				// fractional seconds or leave out the Z; both name the same UTC instant. Any other value,
+				// including a numeric UTC offset that timegm() would ignore, is rejected: it would
+				// otherwise be sent to Apple as a wrong client time.
+				std::string clientTime = jsonVal.at("X-Apple-I-Client-Time").as_string();
+				struct tm tm = { 0 };
+				const char* tail = strptime(clientTime.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
+				if (tail != NULL && *tail == '.')
+				{
+					do
+					{
+						tail++;
+					} while (isdigit((unsigned char)*tail));
 				}
 
-				struct tm tm = { 0 };
-				strptime(jsonVal.at("X-Apple-I-Client-Time").as_string().c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm);
-				unsigned long ts = mktime(&tm);
+				if (tail == NULL || (*tail != '\0' && strcmp(tail, "Z") != 0))
+				{
+					odslog("Invalid X-Apple-I-Client-Time from the anisette server: " << clientTime);
+					throw ServerError(ServerErrorCode::InvalidAnisetteData, {
+						{ LocalizedFailureErrorKey, "The anisette server returned an X-Apple-I-Client-Time that is not a UTC time of the form YYYY-MM-DDTHH:MM:SSZ: " + clientTime }
+					});
+				}
+
+				unsigned long ts = timegm(&tm); // X-Apple-I-Client-Time is UTC; mktime() would read it as local time
 				struct timeval tv = { 0 };
 				tv.tv_sec = ts;
 				tv.tv_usec = 0;
 
-				odslog("Building anisetteData obj...");
+				std::string sanitizedClientInfo = FilterClientInfo(jsonVal.at("X-MMe-Client-Info").as_string());
+
 				anisetteData = std::make_shared<AnisetteData>(
 					jsonVal.at("X-Apple-I-MD-M").as_string(),
 					jsonVal.at("X-Apple-I-MD").as_string(),
@@ -133,7 +224,7 @@ std::shared_ptr<AnisetteData> AnisetteDataManager::FetchAnisetteData()
 					std::atoi(jsonVal.at("X-Apple-I-MD-RINFO").as_string().c_str()),
 					jsonVal.at("X-Mme-Device-Id").as_string(),
 					jsonVal.at("X-Apple-I-SRL-NO").as_string(),
-					jsonVal.at("X-MMe-Client-Info").as_string(),
+					sanitizedClientInfo,
 					tv,
 					jsonVal.at("X-Apple-Locale").as_string(),
 					jsonVal.at("X-Apple-I-TimeZone").as_string());

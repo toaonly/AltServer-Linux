@@ -21,6 +21,8 @@
 #include "Error.hpp"
 
 #include "AltServerApp.h"
+#include "AppleAPI.hpp"
+#include "AnisetteDataManager.h"
 
 #define odslog(msg) { std::stringstream ss; ss << msg << std::endl; OutputDebugStringA(ss.str().c_str()); }
 
@@ -84,7 +86,7 @@ void print_help() {
 			"\n"
 			"The following environment var can be set for some special situation:\n"
 			"  - ALTSERVER_ANISETTE_SERVER: Set to custom anisette server URL\n"
-			"          if not set, the default one: https://armconverter.com/anisette/irGb3Quww8zrhgqnzmrx, is used\n"
+			"          if not set, the default one: https://new.ani.sidestore.io, is used\n"
 			"  - ALTSERVER_NO_SUBSCRIBE: (*unused*) Please enable this for usbmuxd server that do not correctly usbmuxd_listen interfaces\n"
 			);
 }
@@ -109,6 +111,11 @@ int main(int argc, char *argv[]) {
 	
 	char *ipaPath = NULL;
 	int debugLogLevel = 0;
+
+	// Fresh anisette data between 2FA sign-in steps (Apple rejects reused one-time passwords).
+	AppleAPI::getInstance()->anisetteDataRefreshHandler = []() {
+		return AnisetteDataManager::instance()->FetchAnisetteData();
+	};
 
 	while (1) {
 		int this_option_optind = optind ? optind : 1;
