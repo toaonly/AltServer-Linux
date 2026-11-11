@@ -1,6 +1,6 @@
 [submodule "AltServer-Windows"]
 	path = upstream_repo
-	url = https://github.com/jaakkopalvaila/AltServer-Windows
+	url = https://github.com/toaonly/AltServer-Windows
 	branch = ng-fixes
 [submodule "libraries/libplist"]
 	path = libraries/libplist
@@ -11,7 +11,7 @@
 	url = https://github.com/libimobiledevice/libusbmuxd
 [submodule "libraries/libimobiledevice"]
 	path = libraries/libimobiledevice
-	url = https://github.com/jaakkopalvaila/libimobiledevice
+	url = https://github.com/toaonly/libimobiledevice
 	branch = ng-fixes
 [submodule "libraries/ideviceinstaller"]
 	path = libraries/ideviceinstaller
